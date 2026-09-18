@@ -1,112 +1,152 @@
 services:
-  navidrome:
-    image: deluan/navidrome:latest
-    container_name: navidrome
-    restart: unless-stopped
-    user: "1000:1000"
-    ports:
-      - "4533:4533"
-    environment:
-      TZ: ${TZ:-Europe/Lisbon}
-      ND_LOGLEVEL: info
-      ND_SCANSCHEDULE: 1m
-      ND_SESSIONTIMEOUT: 24h
-      ND_SCANNER_PURGEMISSING: always
-    volumes:
-      - ${NAVIDROME_DATA_PATH:-./data/navidrome}:/data
-      - ${MUSIC_PATH:-./music}:/music
-    networks:
-      - music-network
-
   octo:
-    image: ghcr.io/gustavocou/gusonic-octo:latest
+    build: .
     container_name: octo
     restart: unless-stopped
     ports:
-      - "5275:8080"
+      - "5274:8080"
     environment:
-      TZ: ${TZ:-Europe/Lisbon}
       ASPNETCORE_ENVIRONMENT: Production
 
-      Subsonic__Url: http://navidrome:4533
-      Subsonic__AutoDetectDownloadPath: "false"
-      Subsonic__StorageMode: Stream
-      Subsonic__EnableSearchDiscovery: "true"
-      Subsonic__EnableExternalPlaylists: "true"
-
-      Subsonic__DownloadMode: Track
-      Subsonic__DownloadOnStar: "true"
-      Subsonic__DownloadAlbumOnStar: "true"
-      Subsonic__DownloadSource: ${DOWNLOAD_SOURCE:-Soulseek}
+      # ----- Subsonic / Navidrome upstream -----
+      # Required. Your Navidrome server, reachable from THIS container (a LAN IP
+      # or service name, not localhost). Left blank on purpose so a missing value
+      # is detected and reported clearly instead of silently failing.
+      Subsonic__Url: ${SUBSONIC_URL:-}
+      # Optional Navidrome admin login. Lets Octo detect the music folder and run
+      # authenticated rescans on its own. Leave blank to have Octo learn an admin
+      # token from a client sign-in instead.
+      Subsonic__AdminUsername: ${SUBSONIC_ADMIN_USERNAME:-}
+      Subsonic__AdminPassword: ${SUBSONIC_ADMIN_PASSWORD:-}
+      # Auto-detect the download folder from Navidrome so downloads land where it
+      # scans. Only adopts a path Octo can actually see; otherwise falls back to
+      # Library__DownloadPath below. Set false to always use that path verbatim.
+      Subsonic__AutoDetectDownloadPath: ${AUTO_DETECT_DOWNLOAD_PATH:-true}
+      Subsonic__StorageMode: ${STORAGE_MODE:-Stream}
+      Subsonic__DownloadMode: ${DOWNLOAD_MODE:-Track}
+      Subsonic__DownloadOnStar: ${DOWNLOAD_ON_STAR:-true}
+      Subsonic__DownloadAlbumOnStar: ${DOWNLOAD_ALBUM_ON_STAR:-true}
+      Subsonic__WaitForLosslessOnPlay: ${WAIT_FOR_LOSSLESS_ON_PLAY:-false}
+      Subsonic__LosslessWaitTimeoutSeconds: ${LOSSLESS_WAIT_TIMEOUT_SECONDS:-0}
       Subsonic__FolderStructure: ${FOLDER_STRUCTURE:-Flat}
+      Subsonic__DownloadSource: ${DOWNLOAD_SOURCE:-Soulseek}
+      Subsonic__UseLocalStaging: ${USE_LOCAL_STAGING:-false}
+      Subsonic__ExplicitFilter: ${EXPLICIT_FILTER:-All}
+      Subsonic__CacheDurationHours: ${CACHE_DURATION_HOURS:-1}
+      Subsonic__EnableExternalPlaylists: ${ENABLE_EXTERNAL_PLAYLISTS:-false}
+      Subsonic__EnableSearchDiscovery: ${ENABLE_SEARCH_DISCOVERY:-true}
 
+      # Where downloaded FLACs land (bind-mount below)
       Library__DownloadPath: /music
-      Metadata__Language: ${METADATA_LANGUAGE:-es}
 
+      # ----- yt-dlp shim sidecar (internal stream-preview source) -----
       YouTube__ShimUrl: http://yt-dlp-shim:8080
 
+      # ----- slskd (Soulseek) sidecar -----
       Soulseek__BaseUrl: http://slskd:5030
-      Soulseek__Username: ${SLSKD_USERNAME}
-      Soulseek__Password: ${SLSKD_PASSWORD}
-      Soulseek__SearchWaitSeconds: "30"
-      Soulseek__MinFileSizeBytes: "5242880"
-      Soulseek__PreferredExtension: flac
-      Soulseek__DownloadTimeoutSeconds: "180"
+      Soulseek__Username: ${SLSKD_USERNAME:-slskd}
+      Soulseek__Password: ${SLSKD_PASSWORD:-slskd}
+      Soulseek__SearchWaitSeconds: ${SLSKD_SEARCH_WAIT_SECONDS:-30}
+      Soulseek__MinFileSizeBytes: ${SLSKD_MIN_FILE_SIZE_BYTES:-5242880}
+      Soulseek__PreferredExtension: ${SLSKD_PREFERRED_EXTENSION:-flac}
+      Soulseek__DownloadTimeoutSeconds: ${SLSKD_DOWNLOAD_TIMEOUT_SECONDS:-180}
 
-      Lidarr__BaseUrl: http://lidarr:8686
-      Lidarr__ApiKey: ${LIDARR_API_KEY}
-      Lidarr__RootFolderPath: /music
+      # ----- existing Lidarr (optional heart-download source) -----
+      Lidarr__BaseUrl: ${LIDARR_URL:-}
+      Lidarr__ApiKey: ${LIDARR_API_KEY:-}
+      Lidarr__RootFolderPath: ${LIDARR_ROOT_FOLDER_PATH:-}
       Lidarr__QualityProfileId: ${LIDARR_QUALITY_PROFILE_ID:-0}
       Lidarr__MetadataProfileId: ${LIDARR_METADATA_PROFILE_ID:-0}
       Lidarr__CompletionMode: ${LIDARR_COMPLETION_MODE:-Accepted}
       Lidarr__ImportTimeoutSeconds: ${LIDARR_IMPORT_TIMEOUT_SECONDS:-1800}
 
-      LastFm__ApiKey: ${LASTFM_API_KEY}
-      LastFm__EnableRadio: "true"
-      LastFm__ExposeRadioAsPlaylists: "true"
-      LastFm__ExposeRadioAsStreams: "true"
+      # ----- Last.fm radio (core Octo feature; no separate Radio service) -----
+      LastFm__ApiKey: ${LASTFM_API_KEY:-}
+      LastFm__EnableRadio: ${LASTFM_ENABLE_RADIO:-true}
+      LastFm__RadioTrackCount: ${LASTFM_RADIO_TRACK_COUNT:-50}
+      LastFm__RadioCacheDurationHours: ${LASTFM_RADIO_CACHE_HOURS:-24}
+      LastFm__EnablePersonalizedStations: ${LASTFM_ENABLE_PERSONALIZED_STATIONS:-true}
+      LastFm__EnableDiscoveryStations: ${LASTFM_ENABLE_DISCOVERY_STATIONS:-true}
+      LastFm__ExposeRadioAsPlaylists: ${LASTFM_EXPOSE_AS_PLAYLISTS:-true}
+      LastFm__ExposeRadioAsStreams: ${LASTFM_EXPOSE_AS_STREAMS:-true}
+      LastFm__RadioStreamBitrateKbps: ${LASTFM_RADIO_STREAM_BITRATE_KBPS:-192}
+      LastFm__HistoryRetentionDays: ${LASTFM_HISTORY_RETENTION_DAYS:-90}
+      LastFm__DiscoveryPercent: ${LASTFM_DISCOVERY_PERCENT:-35}
+      LastFm__RefreshIntervalHours: ${LASTFM_REFRESH_INTERVAL_HOURS:-12}
+      LastFm__MinimumPlays: ${LASTFM_MINIMUM_PLAYS:-10}
 
-      Notifications__NotifyDownloadStarted: "true"
-      Notifications__NotifyDownloadCompleted: "true"
-      Notifications__NotifyDownloadFailed: "true"
-      Notifications__NotifyAlbumCompleted: "true"
+      # ----- Metadata language (genre tags etc. from Deezer / Last.fm) -----
+      Metadata__Language: ${METADATA_LANGUAGE:-en}
 
+      # ----- Notifications (ntfy / Discord webhook) — both optional -----
+      Notifications__NtfyUrl: ${NTFY_URL:-}
+      Notifications__NtfyToken: ${NTFY_TOKEN:-}
+      Notifications__DiscordWebhookUrl: ${DISCORD_WEBHOOK_URL:-}
+      Notifications__NotifyDownloadStarted: ${NOTIFY_DOWNLOAD_STARTED:-false}
+      Notifications__NotifyDownloadCompleted: ${NOTIFY_DOWNLOAD_COMPLETED:-true}
+      Notifications__NotifyLosslessFallback: ${NOTIFY_LOSSLESS_FALLBACK:-true}
+      Notifications__NotifyDownloadFailed: ${NOTIFY_DOWNLOAD_FAILED:-true}
+      Notifications__NotifyAlbumCompleted: ${NOTIFY_ALBUM_COMPLETED:-true}
     volumes:
-      - ${OCTO_CONFIG_PATH:-./data/octo}:/app/config
-      - ${MUSIC_PATH:-./music}:/music
+      - ${DOWNLOAD_PATH:-./downloads}:/music
+      # Editable settings file — admin UI writes here, ASP.NET hot-reloads on
+      # change. Bind-mounted to host so values survive `docker compose up`.
+      - ./octo-config:/app/config
     depends_on:
-      - navidrome
       - yt-dlp-shim
       - slskd
-      - lidarr
-    networks:
-      - music-network
 
+  # Wraps yt-dlp behind /search and /stream HTTP endpoints. Isolating the binary
+  # in its own container prevents .NET process-management quirks from wedging
+  # the parent (see Brain/projects/Flaccy.md, 2026-04-29 LXC wedge note).
   yt-dlp-shim:
-    build:
-      context: https://github.com/winters27/octo.git#2579262a5d5ac9ed0b8a11c208e71e5059d71d95:yt-dlp-shim
-    container_name: octo-ytdlp
+    build: ./yt-dlp-shim
+    container_name: yt-dlp-shim
     restart: unless-stopped
     environment:
-      MAX_CONCURRENT_YTDLP: "5"
-      GATE_RESERVE_INTERACTIVE: "2"
-      BG_GATE_WAIT_SEC: "10"
-      SEARCH_CACHE_MAX: "1024"
-      URL_CACHE_MAX: "512"
-      URL_CACHE_TTL: "3600"
+      MAX_CONCURRENT_YTDLP: ${YTDLP_MAX_CONCURRENT:-5}
+      # Slots of the above that background work (prewarm, star-downloads) can
+      # never occupy, so pressing play does not queue behind a prewarm burst.
+      GATE_RESERVE_INTERACTIVE: ${YTDLP_GATE_RESERVE:-2}
+      # Background gives up on a full gate quickly: it is fire-and-forget and
+      # already stale by the time a long queue clears.
+      BG_GATE_WAIT_SEC: ${YTDLP_BG_GATE_WAIT_SEC:-10}
+      SEARCH_CACHE_MAX: ${YTDLP_SEARCH_CACHE_MAX:-1024}
+      URL_CACHE_MAX: ${YTDLP_URL_CACHE_MAX:-512}
+      URL_CACHE_TTL: ${YTDLP_URL_CACHE_TTL:-3600}
+      # Root the /download endpoint may write under (matches the /music mount).
       DOWNLOAD_ROOT: /music
+      # Run yt-dlp from the volume below rather than the copy baked into the
+      # image, so a self-update survives the container being recreated. The
+      # image copy is still the floor: a rebuild re-seeds this on next start.
       YTDLP_PATH: /opt/ytdlp/yt-dlp
+      # Persistent duration cache (SQLite). On the named volume below so resolved
+      # "artist - title -> {video_id, duration}" mappings survive container recreate.
       META_DB_PATH: /var/lib/ytshim/meta.db
     expose:
       - "8080"
     volumes:
+      # Persist yt-dlp's player/nsig cache so base.js + signature solving is not
+      # repeated on every fork, and survives container recreate. Named volume so
+      # ownership is correct and `docker compose down` does not touch host paths.
       - ytdlp-cache:/root/.cache/yt-dlp
+      # Persistent duration cache DB (see META_DB_PATH above).
       - ytshim-cache:/var/lib/ytshim
+      # Shared music root so YouTube-MP3 downloads (DownloadSource=YouTube) land
+      # where Navidrome scans; same host dir Octo and slskd mount, so dest paths
+      # line up across containers.
+      - ${DOWNLOAD_PATH:-./downloads}:/music
+      # Writable home for the yt-dlp binary. YouTube rotates its player on its
+      # own schedule and YTDLP_VERSION=latest is resolved at BUILD time, so an
+      # image that is not rebuilt ships one frozen version forever. The shim
+      # self-updates when a 403 outlives a cache purge; this is what makes that
+      # update outlive the next `docker compose up -d`.
       - ytdlp-bin:/opt/ytdlp
-      - ${MUSIC_PATH:-./music}:/music
-    networks:
-      - music-network
 
+  # Soulseek client (slskd). Web UI on 5030, peer port 50300.
+  # State (config, db, downloads-in-progress) persisted to ./slskd-state so the
+  # account survives recreate. SLSKD_DOWNLOADS_DIR below sends finished files
+  # to the same /music mount Octo watches.
   slskd:
     image: slskd/slskd:latest
     container_name: slskd
@@ -116,37 +156,22 @@ services:
       - "50300:50300"
     environment:
       SLSKD_REMOTE_CONFIGURATION: "true"
+      # Completed downloads go to the shared /music mount so Octo can see and
+      # relocate them. Without this slskd defaults to <app>/downloads, which the
+      # slskd-state mount turns into ./slskd-state/downloads, a directory Octo
+      # does not mount (issue #17). Incomplete transfers stay at the default
+      # /app/incomplete (inside slskd-state) so partial files never enter the
+      # library Navidrome scans.
+      # NOTE: an explicit directories.downloads in ./slskd-state/slskd.yml
+      # outranks this env var (slskd precedence: env < yaml).
       SLSKD_DOWNLOADS_DIR: /music
-      SLSKD_SLSK_USERNAME: ${SOULSEEK_USERNAME}
-      SLSKD_SLSK_PASSWORD: ${SOULSEEK_PASSWORD}
-      SLSKD_USERNAME: ${SLSKD_USERNAME}
-      SLSKD_PASSWORD: ${SLSKD_PASSWORD}
+      SLSKD_SLSK_USERNAME: ${SLSKD_SOULSEEK_USERNAME:-}
+      SLSKD_SLSK_PASSWORD: ${SLSKD_SOULSEEK_PASSWORD:-}
+      SLSKD_USERNAME: ${SLSKD_USERNAME:-slskd}
+      SLSKD_PASSWORD: ${SLSKD_PASSWORD:-slskd}
     volumes:
-      - ${SLSKD_CONFIG_PATH:-./data/slskd}:/app
-      - ${MUSIC_PATH:-./music}:/music
-    networks:
-      - music-network
-
-  lidarr:
-    image: lscr.io/linuxserver/lidarr:latest
-    container_name: lidarr
-    restart: unless-stopped
-    ports:
-      - "8686:8686"
-    environment:
-      PUID: "${PUID:-1000}"
-      PGID: "${PGID:-1000}"
-      TZ: ${TZ:-Europe/Lisbon}
-    volumes:
-      - ${LIDARR_CONFIG_PATH:-./data/lidarr}:/config
-      - ${MUSIC_PATH:-./music}:/music
-      - ${LIDARR_DOWNLOADS_PATH:-./data/lidarr-downloads}:/downloads
-    networks:
-      - music-network
-
-networks:
-  music-network:
-    driver: bridge
+      - ./slskd-state:/app
+      - ${DOWNLOAD_PATH:-./downloads}:/music
 
 volumes:
   ytdlp-cache:
