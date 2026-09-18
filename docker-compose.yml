@@ -1,0 +1,154 @@
+services:
+  navidrome:
+    image: deluan/navidrome:latest
+    container_name: navidrome
+    restart: unless-stopped
+    user: "1000:1000"
+    ports:
+      - "4533:4533"
+    environment:
+      TZ: ${TZ:-Europe/Lisbon}
+      ND_LOGLEVEL: info
+      ND_SCANSCHEDULE: 1m
+      ND_SESSIONTIMEOUT: 24h
+      ND_SCANNER_PURGEMISSING: always
+    volumes:
+      - ${NAVIDROME_DATA_PATH:-./data/navidrome}:/data
+      - ${MUSIC_PATH:-./music}:/music
+    networks:
+      - music-network
+
+  octo:
+    image: ghcr.io/gustavocou/gusonic-octo:latest
+    container_name: octo
+    restart: unless-stopped
+    ports:
+      - "5275:8080"
+    environment:
+      TZ: ${TZ:-Europe/Lisbon}
+      ASPNETCORE_ENVIRONMENT: Production
+
+      Subsonic__Url: http://navidrome:4533
+      Subsonic__AutoDetectDownloadPath: "false"
+      Subsonic__StorageMode: Stream
+      Subsonic__EnableSearchDiscovery: "true"
+      Subsonic__EnableExternalPlaylists: "true"
+
+      Subsonic__DownloadMode: Track
+      Subsonic__DownloadOnStar: "true"
+      Subsonic__DownloadAlbumOnStar: "true"
+      Subsonic__DownloadSource: ${DOWNLOAD_SOURCE:-Soulseek}
+      Subsonic__FolderStructure: ${FOLDER_STRUCTURE:-Flat}
+
+      Library__DownloadPath: /music
+      Metadata__Language: ${METADATA_LANGUAGE:-es}
+
+      YouTube__ShimUrl: http://yt-dlp-shim:8080
+
+      Soulseek__BaseUrl: http://slskd:5030
+      Soulseek__Username: ${SLSKD_USERNAME}
+      Soulseek__Password: ${SLSKD_PASSWORD}
+      Soulseek__SearchWaitSeconds: "30"
+      Soulseek__MinFileSizeBytes: "5242880"
+      Soulseek__PreferredExtension: flac
+      Soulseek__DownloadTimeoutSeconds: "180"
+
+      Lidarr__BaseUrl: http://lidarr:8686
+      Lidarr__ApiKey: ${LIDARR_API_KEY}
+      Lidarr__RootFolderPath: /music
+      Lidarr__QualityProfileId: ${LIDARR_QUALITY_PROFILE_ID:-0}
+      Lidarr__MetadataProfileId: ${LIDARR_METADATA_PROFILE_ID:-0}
+      Lidarr__CompletionMode: ${LIDARR_COMPLETION_MODE:-Accepted}
+      Lidarr__ImportTimeoutSeconds: ${LIDARR_IMPORT_TIMEOUT_SECONDS:-1800}
+
+      LastFm__ApiKey: ${LASTFM_API_KEY}
+      LastFm__EnableRadio: "true"
+      LastFm__ExposeRadioAsPlaylists: "true"
+      LastFm__ExposeRadioAsStreams: "true"
+
+      Notifications__NotifyDownloadStarted: "true"
+      Notifications__NotifyDownloadCompleted: "true"
+      Notifications__NotifyDownloadFailed: "true"
+      Notifications__NotifyAlbumCompleted: "true"
+
+    volumes:
+      - ${OCTO_CONFIG_PATH:-./data/octo}:/app/config
+      - ${MUSIC_PATH:-./music}:/music
+    depends_on:
+      - navidrome
+      - yt-dlp-shim
+      - slskd
+      - lidarr
+    networks:
+      - music-network
+
+  yt-dlp-shim:
+    build:
+      context: https://github.com/winters27/octo.git#2579262a5d5ac9ed0b8a11c208e71e5059d71d95:yt-dlp-shim
+    container_name: octo-ytdlp
+    restart: unless-stopped
+    environment:
+      MAX_CONCURRENT_YTDLP: "5"
+      GATE_RESERVE_INTERACTIVE: "2"
+      BG_GATE_WAIT_SEC: "10"
+      SEARCH_CACHE_MAX: "1024"
+      URL_CACHE_MAX: "512"
+      URL_CACHE_TTL: "3600"
+      DOWNLOAD_ROOT: /music
+      YTDLP_PATH: /opt/ytdlp/yt-dlp
+      META_DB_PATH: /var/lib/ytshim/meta.db
+    expose:
+      - "8080"
+    volumes:
+      - ytdlp-cache:/root/.cache/yt-dlp
+      - ytshim-cache:/var/lib/ytshim
+      - ytdlp-bin:/opt/ytdlp
+      - ${MUSIC_PATH:-./music}:/music
+    networks:
+      - music-network
+
+  slskd:
+    image: slskd/slskd:latest
+    container_name: slskd
+    restart: unless-stopped
+    ports:
+      - "5030:5030"
+      - "50300:50300"
+    environment:
+      SLSKD_REMOTE_CONFIGURATION: "true"
+      SLSKD_DOWNLOADS_DIR: /music
+      SLSKD_SLSK_USERNAME: ${SOULSEEK_USERNAME}
+      SLSKD_SLSK_PASSWORD: ${SOULSEEK_PASSWORD}
+      SLSKD_USERNAME: ${SLSKD_USERNAME}
+      SLSKD_PASSWORD: ${SLSKD_PASSWORD}
+    volumes:
+      - ${SLSKD_CONFIG_PATH:-./data/slskd}:/app
+      - ${MUSIC_PATH:-./music}:/music
+    networks:
+      - music-network
+
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr
+    restart: unless-stopped
+    ports:
+      - "8686:8686"
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      TZ: ${TZ:-Europe/Lisbon}
+    volumes:
+      - ${LIDARR_CONFIG_PATH:-./data/lidarr}:/config
+      - ${MUSIC_PATH:-./music}:/music
+      - ${LIDARR_DOWNLOADS_PATH:-./data/lidarr-downloads}:/downloads
+    networks:
+      - music-network
+
+networks:
+  music-network:
+    driver: bridge
+
+volumes:
+  ytdlp-cache:
+  ytshim-cache:
+  ytdlp-bin:
