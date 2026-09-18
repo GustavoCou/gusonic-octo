@@ -1,4 +1,5 @@
 name: Materialize full Octo source
+# Re-run from latest main so source replacement is a fast-forward
 
 on:
   push:
