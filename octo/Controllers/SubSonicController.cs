@@ -293,6 +293,9 @@ public class SubsonicController : ControllerBase
         if (IsFailedSubsonicBody(relay.Body, relay.ContentType))
             return File(relay.Body, relay.ContentType ?? $"application/{format}");
 
+        var discoveryGenres = await _externalSearch.GetDiscoveryGenresAsync(
+            50, HttpContext.RequestAborted);
+
         try
         {
             if (format.Equals("json", StringComparison.OrdinalIgnoreCase)
@@ -315,7 +318,7 @@ public class SubsonicController : ControllerBase
                     }
                 }
 
-                foreach (var genre in SmartSearchInterpreter.CuratedGenres)
+                foreach (var genre in discoveryGenres)
                 {
                     if (!existing.Add(genre)) continue;
                     rows.Add(new JsonObject
@@ -346,7 +349,7 @@ public class SubsonicController : ControllerBase
                 .Where(value => !string.IsNullOrWhiteSpace(value))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var genre in SmartSearchInterpreter.CuratedGenres)
+            foreach (var genre in discoveryGenres)
             {
                 if (!existingXml.Add(genre)) continue;
                 genresElement.Add(new XElement(ns + "genre",
