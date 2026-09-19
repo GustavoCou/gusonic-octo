@@ -54,21 +54,37 @@ public sealed class ExternalSearchService
     private readonly IMusicMetadataService _metadata;
     private readonly LastFmService? _lastFm;
     private readonly SmartSearchInterpreter _smartSearch;
+    private readonly SmartSearchAiService _smartSearchAi;
     private readonly ILogger<ExternalSearchService> _logger;
 
     public ExternalSearchService(
         IMusicMetadataService metadata,
         SmartSearchInterpreter smartSearch,
+        SmartSearchAiService smartSearchAi,
         ILogger<ExternalSearchService> logger,
         LastFmService? lastFm = null)
     {
         _metadata = metadata;
         _smartSearch = smartSearch;
+        _smartSearchAi = smartSearchAi;
         _logger = logger;
         _lastFm = lastFm;
     }
 
     public SmartSearchInterpreter.Intent Interpret(string query) => _smartSearch.Interpret(query);
+
+    private async Task<SmartSearchInterpreter.Intent> InterpretAsync(
+        string query, CancellationToken ct)
+    {
+        // Deterministic rules are instant and cover common PT/ES/EN searches. If they
+        // already recognise intent, do not spend an AI roundtrip. Otherwise an optional
+        // multilingual model gets a chance to understand arbitrary languages and slang.
+        var builtIn = _smartSearch.Interpret(query);
+        if (builtIn.IsSemantic || !_smartSearchAi.IsConfigured) return builtIn;
+
+        var ai = await _smartSearchAi.InterpretAsync(query, ct);
+        return ai ?? builtIn;
+    }
 
     /// <summary>
     /// Up to <see cref="BuildSize"/> enriched external songs for this query. Callers take
@@ -145,7 +161,7 @@ public sealed class ExternalSearchService
         if (string.IsNullOrWhiteSpace(query) || limit <= 0)
             return new List<Octo.Models.Subsonic.ExternalPlaylist>();
 
-        var intent = _smartSearch.Interpret(query);
+        var intent = await InterpretAsync(query, ct);
         var queries = intent.IsSemantic ? intent.ProviderQueries.Take(3) : new[] { query };
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var result = new List<Octo.Models.Subsonic.ExternalPlaylist>();
@@ -178,7 +194,7 @@ public sealed class ExternalSearchService
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var collected = new List<LastFmService.SimilarTrack>();
-        var intent = _smartSearch.Interpret(query);
+        var intent = await InterpretAsync(query, ct);
 
         void AddRange(IEnumerable<LastFmService.SimilarTrack> source)
         {
