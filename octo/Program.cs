@@ -154,6 +154,7 @@ builder.Services.AddSingleton<HeartAcquisitionCoordinator>();
 // calls for one typed query, and they all resolve to the same routing objects, so without
 // this each call re-runs the enrichment pipeline over them concurrently.
 builder.Services.AddSingleton<SmartSearchInterpreter>();
+builder.Services.AddSingleton<SearchCollectionCache>();
 builder.Services.AddHttpClient(SmartSearchAiService.ClientName, c =>
 {
     c.Timeout = Timeout.InfiniteTimeSpan;
