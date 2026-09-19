@@ -146,9 +146,29 @@ public sealed class ExternalSearchService
         if (_lastFm is null || !_lastFm.HasApiKey || string.IsNullOrWhiteSpace(tag) || limit <= 0)
             return Array.Empty<Song>();
 
-        var canonical = _smartSearch.CanonicalGenre(tag);
-        var tracks = await _lastFm.GetTagTopTracksAsync(canonical, Math.Min(limit * 2, BuildSize), ct);
+        var tracks = await _lastFm.GetTagTopTracksAsync(tag.Trim(), Math.Min(limit * 2, BuildSize), ct);
         return await ResolveTracksAsync(tracks, Math.Min(limit, BuildSize), ct);
+    }
+
+    /// <summary>
+    /// Dynamic genre/tag catalog from Last.fm charts. No language or genre list is
+    /// compiled into Gusonic; the provider decides what is currently discoverable.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> GetDiscoveryGenresAsync(
+        int limit = 50, CancellationToken ct = default)
+    {
+        if (_lastFm is null || !_lastFm.HasApiKey || limit <= 0)
+            return Array.Empty<string>();
+
+        try
+        {
+            return await _lastFm.GetGlobalTopTagsAsync(Math.Min(limit, 100), ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("global genre discovery failed: {M}", ex.Message);
+            return Array.Empty<string>();
+        }
     }
 
     /// <summary>
