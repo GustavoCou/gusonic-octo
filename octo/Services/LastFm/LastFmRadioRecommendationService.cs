@@ -204,10 +204,10 @@ public sealed class LastFmRadioRecommendationService
                 var globalCandidates = Ranked(globalTracks, "chart:global");
                 if (globalCandidates.Count >= 5)
                     stations.Add(Create(username, "global-discovery", "Global Discovery",
-                        LastFmRadioStationKind.Discovery, false, ["lastfm:global-chart"],
+                        LastFmRadioStationKind.Global, false, ["lastfm:global-chart"],
                         Shape(globalCandidates, plays, settings, unavailable, random,
                             Previous("global-discovery"),
-                            ArtistCap(settings, LastFmRadioStationKind.Discovery),
+                            ArtistCap(settings, LastFmRadioStationKind.Global),
                             excludeRecent: true)));
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
