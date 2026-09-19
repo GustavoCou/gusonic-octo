@@ -73,17 +73,17 @@ public sealed class ExternalSearchService
 
     public SmartSearchInterpreter.Intent Interpret(string query) => _smartSearch.Interpret(query);
 
-    private async Task<SmartSearchInterpreter.Intent> InterpretAsync(
-        string query, CancellationToken ct)
+    public async Task<SmartSearchInterpreter.Intent> InterpretQueryAsync(
+        string query, CancellationToken ct = default)
     {
-        // Deterministic rules are instant and cover common PT/ES/EN searches. If they
-        // already recognise intent, do not spend an AI roundtrip. Otherwise an optional
-        // multilingual model gets a chance to understand arbitrary languages and slang.
-        var builtIn = _smartSearch.Interpret(query);
-        if (builtIn.IsSemantic || !_smartSearchAi.IsConfigured) return builtIn;
+        // The deterministic fallback is intentionally language-neutral and literal.
+        // An optional multilingual model adds semantic intent; provider data still
+        // decides which real music is returned.
+        var fallback = _smartSearch.Interpret(query);
+        if (!_smartSearchAi.IsConfigured) return fallback;
 
         var ai = await _smartSearchAi.InterpretAsync(query, ct);
-        return ai ?? builtIn;
+        return ai ?? fallback;
     }
 
     /// <summary>
@@ -181,7 +181,7 @@ public sealed class ExternalSearchService
         if (string.IsNullOrWhiteSpace(query) || limit <= 0)
             return new List<Octo.Models.Subsonic.ExternalPlaylist>();
 
-        var intent = await InterpretAsync(query, ct);
+        var intent = await InterpretQueryAsync(query, ct);
         var queries = intent.IsSemantic ? intent.ProviderQueries.Take(3) : new[] { query };
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var result = new List<Octo.Models.Subsonic.ExternalPlaylist>();
@@ -214,7 +214,7 @@ public sealed class ExternalSearchService
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var collected = new List<LastFmService.SimilarTrack>();
-        var intent = await InterpretAsync(query, ct);
+        var intent = await InterpretQueryAsync(query, ct);
 
         void AddRange(IEnumerable<LastFmService.SimilarTrack> source)
         {
