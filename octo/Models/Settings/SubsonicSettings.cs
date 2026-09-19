@@ -3,6 +3,18 @@ namespace Octo.Models.Settings;
 /// <summary>
 /// Download mode for tracks
 /// </summary>
+public enum ExternalPlaylistSearchMode
+{
+    /// <summary>Legacy compatibility: external playlists are exposed only as album rows.</summary>
+    Album,
+
+    /// <summary>Expose external playlists through playlist collections/search extensions only.</summary>
+    Native,
+
+    /// <summary>Expose both native playlist results and legacy album-compatible rows.</summary>
+    Both,
+}
+
 public enum DownloadMode
 {
     /// <summary>
@@ -205,6 +217,16 @@ public class SubsonicSettings
     /// Playlists appear as "albums" in search results with genre "Playlist"
     /// </summary>
     public bool EnableExternalPlaylists { get; set; } = true;
+
+    /// <summary>
+    /// Controls how external playlist search results are surfaced.
+    /// Native keeps playlist results out of the album bucket and exposes them through
+    /// getPlaylists/getPlaylist plus the searchResult playlist extension.
+    /// Album preserves the historical compatibility mapping. Both emits both shapes.
+    /// Environment variable: SUBSONIC__EXTERNALPLAYLISTSEARCHMODE
+    /// </summary>
+    public ExternalPlaylistSearchMode ExternalPlaylistSearchMode { get; set; } =
+        ExternalPlaylistSearchMode.Both;
 
     /// <summary>
     /// Include Last.fm/Deezer discovery songs and albums in search3/search2 results
