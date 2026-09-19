@@ -337,6 +337,39 @@ public class LastFmService
                 .Where(item => item.Artist.Length > 0 && item.Title.Length > 0).Take(limit).ToList();
         }, cancellationToken);
 
+    public Task<List<string>> GetGlobalTopTagsAsync(int limit = 50,
+        CancellationToken cancellationToken = default) => CachedAsync(
+        $"chart-tags|{limit}", async ct =>
+        {
+            using var doc = await GetDocumentAsync("chart.gettoptags",
+                new Dictionary<string, string> { ["limit"] = limit.ToString() }, ct);
+            if (doc is null || !TryArray(doc.RootElement, "tags", "tag", out var values)) return [];
+            return values.EnumerateArray()
+                .Select(item => Text(item, "name"))
+                .Where(value => value.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(limit)
+                .ToList();
+        }, cancellationToken);
+
+    public Task<List<SimilarTrack>> GetGlobalTopTracksAsync(int limit = 100,
+        CancellationToken cancellationToken = default) => CachedAsync(
+        $"chart-tracks|{limit}", async ct =>
+        {
+            using var doc = await GetDocumentAsync("chart.gettoptracks",
+                new Dictionary<string, string> { ["limit"] = limit.ToString() }, ct);
+            if (doc is null || !TryArray(doc.RootElement, "tracks", "track", out var values)) return [];
+            return values.EnumerateArray()
+                .Select(item => new SimilarTrack(
+                    Text(item, "artist", "name"),
+                    Text(item, "name"),
+                    1,
+                    DurationSeconds(item)))
+                .Where(item => item.Artist.Length > 0 && item.Title.Length > 0)
+                .Take(limit)
+                .ToList();
+        }, cancellationToken);
+
     public Task<TrackInfo?> GetTrackInfoAsync(string artist, string title,
         CancellationToken cancellationToken = default) => CachedAsync<TrackInfo?>(
         $"track-info|{artist}|{title}", async ct =>
