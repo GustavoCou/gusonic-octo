@@ -50,6 +50,7 @@ public class SubsonicController : ControllerBase
     private readonly Octo.Services.Common.TrackAcquisitionQueue _acquisitions;
     private readonly HeartAcquisitionCoordinator _heartAcquisitions;
     private readonly Octo.Services.Common.ExternalSearchService _externalSearch;
+    private readonly SearchCollectionCache _searchCollectionCache;
     private readonly RadioQueueStore _radioQueueStore;
     private readonly NavidromeIdentityService _navIdentity;
     private readonly ILogger<SubsonicController> _logger;
@@ -71,6 +72,7 @@ public class SubsonicController : ControllerBase
         Octo.Services.Common.TrackAcquisitionQueue acquisitions,
         HeartAcquisitionCoordinator heartAcquisitions,
         Octo.Services.Common.ExternalSearchService externalSearch,
+        SearchCollectionCache searchCollectionCache,
         RadioQueueStore radioQueueStore,
         NavidromeIdentityService navIdentity,
         LastFmRadioTrackResolver radioTrackResolver,
@@ -99,6 +101,7 @@ public class SubsonicController : ControllerBase
         _acquisitions = acquisitions;
         _heartAcquisitions = heartAcquisitions;
         _externalSearch = externalSearch;
+        _searchCollectionCache = searchCollectionCache;
         _radioQueueStore = radioQueueStore;
         _navIdentity = navIdentity;
         _radioTrackResolver = radioTrackResolver;
@@ -293,8 +296,32 @@ public class SubsonicController : ControllerBase
         if (IsFailedSubsonicBody(relay.Body, relay.ContentType))
             return File(relay.Body, relay.ContentType ?? $"application/{format}");
 
-        var discoveryGenres = await _externalSearch.GetDiscoveryGenresAsync(
-            50, HttpContext.RequestAborted);
+        var username = parameters.GetValueOrDefault("u", "");
+        var snapshot = _searchCollectionCache.Get(username);
+        var discoveryGenres = (await _externalSearch.GetDiscoveryGenresAsync(
+                75, HttpContext.RequestAborted))
+            .Concat(snapshot.Genres)
+            .ToList();
+
+        // Non-standard but harmless: some clients pass the current search text while
+        // loading their Genres tab. Use the same semantic interpreter when present so
+        // arbitrary-language genre intent can become a native genre row.
+        var genreQuery = parameters.GetValueOrDefault("query", "").Trim();
+        if (genreQuery.Length > 0)
+        {
+            var intent = await _externalSearch.InterpretQueryAsync(
+                genreQuery, HttpContext.RequestAborted);
+            if (!string.IsNullOrWhiteSpace(intent.Genre))
+                discoveryGenres.Add(intent.Genre!);
+            discoveryGenres.AddRange(intent.Tags);
+        }
+
+        discoveryGenres = discoveryGenres
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(100)
+            .ToList();
 
         try
         {
@@ -470,10 +497,35 @@ public class SubsonicController : ControllerBase
         await BootstrapRadioProfileAsync(username, parameters);
         var stations = PlaylistStations(username);
         QueueRefreshIfStale(username);
-        if (stations.Count == 0) return File(relay.Body, relay.ContentType ?? $"application/{format}");
+
+        var snapshot = _searchCollectionCache.Get(username);
+        var externalPlaylists = snapshot.Playlists.ToList();
+
+        // Some clients send the current query when switching to the Playlist tab.
+        // Support that directly; clients that don't are covered by the short-lived
+        // search3 -> getPlaylists bridge above.
+        var playlistQuery = parameters.GetValueOrDefault("query", "").Trim();
+        if (_subsonicSettings.EnableExternalPlaylists && playlistQuery.Length > 0)
+        {
+            externalPlaylists = await _externalSearch.GetPlaylistsAsync(
+                playlistQuery, 20, HttpContext.RequestAborted);
+            var intent = await _externalSearch.InterpretQueryAsync(
+                playlistQuery, HttpContext.RequestAborted);
+            var genres = new List<string>();
+            if (!string.IsNullOrWhiteSpace(intent.Genre)) genres.Add(intent.Genre!);
+            genres.AddRange(intent.Tags);
+            _searchCollectionCache.Remember(username, playlistQuery, externalPlaylists, genres);
+        }
+
+        if (stations.Count == 0 && externalPlaylists.Count == 0)
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+
         try
         {
-            if (format.Equals("json", StringComparison.OrdinalIgnoreCase))
+            var isJson = format.Equals("json", StringComparison.OrdinalIgnoreCase)
+                || relay.ContentType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true;
+
+            if (isJson)
             {
                 var root = JsonNode.Parse(relay.Body)!.AsObject();
                 var response = root["subsonic-response"]!.AsObject();
@@ -481,24 +533,60 @@ public class SubsonicController : ControllerBase
                 response["playlists"] = playlists;
                 var rows = playlists["playlist"] as JsonArray ?? new JsonArray();
                 playlists["playlist"] = rows;
+
+                var existingIds = rows
+                    .OfType<JsonObject>()
+                    .Select(row => row["id"]?.GetValue<string>())
+                    .Where(id => !string.IsNullOrWhiteSpace(id))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
                 foreach (var station in stations)
-                    rows.Add(JsonSerializer.SerializeToNode(_responseBuilder.RadioPlaylistFields(station)));
+                    if (existingIds.Add(station.Id))
+                        rows.Add(JsonSerializer.SerializeToNode(
+                            _responseBuilder.RadioPlaylistFields(station)));
+
+                foreach (var playlist in externalPlaylists)
+                    if (existingIds.Add(playlist.Id))
+                        rows.Add(JsonSerializer.SerializeToNode(
+                            _responseBuilder.ExternalPlaylistFields(playlist)));
+
                 return File(Encoding.UTF8.GetBytes(root.ToJsonString()), "application/json");
             }
+
             var document = XDocument.Parse(Encoding.UTF8.GetString(relay.Body));
             var responseElement = document.Root!;
             var ns = responseElement.Name.Namespace;
-            var playlistsElement = responseElement.Elements().FirstOrDefault(element => element.Name.LocalName == "playlists");
-            if (playlistsElement is null) { playlistsElement = new XElement(ns + "playlists"); responseElement.Add(playlistsElement); }
+            var playlistsElement = responseElement.Elements()
+                .FirstOrDefault(element => element.Name.LocalName == "playlists");
+            if (playlistsElement is null)
+            {
+                playlistsElement = new XElement(ns + "playlists");
+                responseElement.Add(playlistsElement);
+            }
+
+            var existingIdsXml = playlistsElement.Elements()
+                .Where(element => element.Name.LocalName == "playlist")
+                .Select(element => element.Attribute("id")?.Value)
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
             foreach (var station in stations)
-                playlistsElement.Add(new XElement(ns + "playlist",
-                    _responseBuilder.RadioPlaylistFields(station).Select(pair =>
-                        new XAttribute(pair.Key, XmlValue(pair.Value)))));
+                if (existingIdsXml.Add(station.Id))
+                    playlistsElement.Add(new XElement(ns + "playlist",
+                        _responseBuilder.RadioPlaylistFields(station).Select(pair =>
+                            new XAttribute(pair.Key, XmlValue(pair.Value)))));
+
+            foreach (var playlist in externalPlaylists)
+                if (existingIdsXml.Add(playlist.Id))
+                    playlistsElement.Add(new XElement(ns + "playlist",
+                        _responseBuilder.ExternalPlaylistFields(playlist).Select(pair =>
+                            new XAttribute(pair.Key, XmlValue(pair.Value)))));
+
             return File(Encoding.UTF8.GetBytes(document.ToString()), "application/xml");
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Could not merge Radio stations into getPlaylists");
+            _logger.LogWarning(ex, "Could not merge Octo playlists into getPlaylists");
             return File(relay.Body, relay.ContentType ?? $"application/{format}");
         }
     }
@@ -512,6 +600,36 @@ public class SubsonicController : ControllerBase
         var format = parameters.GetValueOrDefault("f", "xml");
         var id = parameters.GetValueOrDefault("id", "");
         var username = parameters.GetValueOrDefault("u", "");
+
+        if (PlaylistIdHelper.IsExternalPlaylist(id))
+        {
+            var auth = parameters.ToDictionary(pair => pair.Key, pair => pair.Value);
+            auth.Remove("id");
+            var ping = await _proxyService.RelaySafeAsync("rest/ping", auth);
+            if (!ping.Success || ping.Body is null || !IsSuccessfulSubsonicResponse(ping.Body, format))
+                return _responseBuilder.CreateError(format, 40, "Wrong username or password");
+
+            try
+            {
+                var (provider, externalId) = PlaylistIdHelper.ParsePlaylistId(id);
+                var playlist = await _metadataService.GetPlaylistAsync(provider, externalId);
+                if (playlist is null)
+                    return _responseBuilder.CreateError(format, 70, "Playlist not found");
+
+                var songs = await _metadataService.GetPlaylistTracksAsync(provider, externalId);
+                _radioQueueStore.Register(songs.Select(song => song.Id));
+                _ = _metadataService.PrewarmYouTubeIdsAsync(songs, topN: 8);
+                _ = _metadataService.PrewarmCoverArtAsync(songs, topN: 16);
+
+                return _responseBuilder.CreateExternalPlaylistResponse(format, playlist, songs);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "External playlist {PlaylistId} could not be loaded", id);
+                return _responseBuilder.CreateError(format, 70, "Playlist not found");
+            }
+        }
+
         var station = PlaylistStations(username).FirstOrDefault(item => item.Id == id);
         if (station is null)
         {
@@ -1083,10 +1201,42 @@ public class SubsonicController : ControllerBase
             externalTarget + Math.Max(0, localSongTarget - localParsed.Songs.Count));
         var externalSongs = built.Take(externalSlice).ToList();
 
-        var playlistTask = _subsonicSettings.EnableExternalPlaylists && requestedAlbums > 0
-            ? await _externalSearch.GetPlaylistsAsync(cleanQuery, Math.Min(requestedAlbums, 8),
+        var requestedPlaylists = int.TryParse(
+            parameters.GetValueOrDefault("playlistCount", "20"), out var pc)
+            ? Math.Clamp(pc, 0, 50)
+            : 20;
+
+        var nativePlaylistMode = _subsonicSettings.ExternalPlaylistSearchMode
+            is ExternalPlaylistSearchMode.Native or ExternalPlaylistSearchMode.Both;
+        var albumPlaylistMode = _subsonicSettings.ExternalPlaylistSearchMode
+            is ExternalPlaylistSearchMode.Album or ExternalPlaylistSearchMode.Both;
+
+        // Native playlist discovery must not be tied to albumCount. A client selecting
+        // its Playlists tab can legitimately ask for zero albums.
+        var playlistLimit = nativePlaylistMode
+            ? requestedPlaylists
+            : Math.Min(requestedAlbums, 20);
+
+        var playlistTask = _subsonicSettings.EnableExternalPlaylists && playlistLimit > 0
+            ? await _externalSearch.GetPlaylistsAsync(cleanQuery, Math.Min(playlistLimit, 20),
                 HttpContext.RequestAborted)
             : new List<ExternalPlaylist>();
+
+        var searchIntent = await _externalSearch.InterpretQueryAsync(
+            cleanQuery, HttpContext.RequestAborted);
+        var searchGenres = new List<string>();
+        if (!string.IsNullOrWhiteSpace(searchIntent.Genre))
+            searchGenres.Add(searchIntent.Genre!);
+        searchGenres.AddRange(searchIntent.Tags);
+        searchGenres = searchGenres
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(8)
+            .ToList();
+
+        var username = parameters.GetValueOrDefault("u", "");
+        _searchCollectionCache.Remember(username, cleanQuery, playlistTask, searchGenres);
 
         // Degrade to no albums rather than failing the whole search if Deezer is slow,
         // throttled or unreachable.
@@ -1119,7 +1269,22 @@ public class SubsonicController : ControllerBase
         var localSongIds = ExtractLocalSongIds(localResult.Body, localResult.ContentType);
         _radioQueueStore.Register(localSongIds.Concat(externalSongs.Select(s => s.Id)));
 
-        return MergeSearchResults(localParsed, localResult.ContentType, externalResult, playlistTask, format, envelope);
+        var playlistsAsAlbums = albumPlaylistMode
+            ? playlistTask
+            : new List<ExternalPlaylist>();
+        var nativePlaylists = nativePlaylistMode
+            ? playlistTask
+            : new List<ExternalPlaylist>();
+
+        return MergeSearchResults(
+            localParsed,
+            localResult.ContentType,
+            externalResult,
+            playlistsAsAlbums,
+            nativePlaylists,
+            searchGenres,
+            format,
+            envelope);
     }
 
     /// <summary>
@@ -1917,6 +2082,8 @@ public class SubsonicController : ControllerBase
         string? localContentType,
         SearchResult externalResult,
         List<ExternalPlaylist> playlistResult,
+        IReadOnlyList<ExternalPlaylist> nativePlaylists,
+        IReadOnlyList<string> nativeGenres,
         string format,
         string envelope)
     {
@@ -1945,6 +2112,20 @@ public class SubsonicController : ControllerBase
                     ["song"] = mergedSongs,
                     ["album"] = mergedAlbums,
                     ["artist"] = mergedArtists,
+                    // OpenSubsonic search3 itself only standardises artist/album/song.
+                    // These additive fields are ignored by strict clients and consumed
+                    // by clients that expose native Playlist/Genre search categories.
+                    ["playlist"] = nativePlaylists
+                        .Select(_responseBuilder.ExternalPlaylistFields)
+                        .ToList(),
+                    ["genre"] = nativeGenres
+                        .Select(value => new Dictionary<string, object>
+                        {
+                            ["value"] = value,
+                            ["songCount"] = 0,
+                            ["albumCount"] = 0
+                        })
+                        .ToList(),
                 },
             });
         }
@@ -1964,6 +2145,19 @@ public class SubsonicController : ControllerBase
             foreach (var song in mergedSongs.Cast<XElement>())
             {
                 searchResult.Add(song);
+            }
+            foreach (var playlist in nativePlaylists)
+            {
+                searchResult.Add(new XElement(ns + "playlist",
+                    _responseBuilder.ExternalPlaylistFields(playlist).Select(pair =>
+                        new XAttribute(pair.Key, XmlValue(pair.Value)))));
+            }
+            foreach (var genre in nativeGenres)
+            {
+                searchResult.Add(new XElement(ns + "genre",
+                    new XAttribute("songCount", 0),
+                    new XAttribute("albumCount", 0),
+                    genre));
             }
 
             var doc = new XDocument(
