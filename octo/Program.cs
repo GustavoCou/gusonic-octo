@@ -67,6 +67,8 @@ builder.Services.Configure<NotificationSettings>(
     builder.Configuration.GetSection("Notifications"));
 builder.Services.Configure<MetadataSettings>(
     builder.Configuration.GetSection("Metadata"));
+builder.Services.Configure<SmartSearchSettings>(
+    builder.Configuration.GetSection("SmartSearch"));
 builder.Services.Configure<ServerSettings>(
     builder.Configuration.GetSection("Server"));
 builder.Services.Configure<ListenBrainzSettings>(
@@ -151,6 +153,12 @@ builder.Services.AddSingleton<HeartAcquisitionCoordinator>();
 // Discovery results are built once per query and shared. Clients fire several search
 // calls for one typed query, and they all resolve to the same routing objects, so without
 // this each call re-runs the enrichment pipeline over them concurrently.
+builder.Services.AddSingleton<SmartSearchInterpreter>();
+builder.Services.AddHttpClient(SmartSearchAiService.ClientName, c =>
+{
+    c.Timeout = Timeout.InfiniteTimeSpan;
+});
+builder.Services.AddSingleton<SmartSearchAiService>();
 builder.Services.AddSingleton<Octo.Services.Common.ExternalSearchService>();
 
 // Permanent-copy fetches run here, never inside the request that asked for one. A client

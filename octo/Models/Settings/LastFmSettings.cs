@@ -58,8 +58,9 @@ public class LastFmSettings
 
     public int HistoryRetentionDays { get; set; } = 90;
     public int DiscoveryPercent { get; set; } = 35;
-    public int RefreshIntervalHours { get; set; } = 12;
+    public int RefreshIntervalHours { get; set; } = 6;
     public int MinimumPlays { get; set; } = 10;
+
     public List<DiscoveryStationSettings> DiscoveryStations { get; set; } = [];
 
     public int EffectiveHistoryRetentionDays => Math.Clamp(HistoryRetentionDays, 7, 365);

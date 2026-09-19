@@ -52,6 +52,7 @@ public enum LastFmRadioStationKind
     Discovery,
     Artist,
     Genre,
+    Global,
     Pinned,
 }
 

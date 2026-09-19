@@ -195,6 +195,27 @@ public sealed class LastFmRadioRecommendationService
 
         if (settings.EnableDiscoveryStations)
         {
+            // Provider-driven general discovery: no fixed genre list lives in Gusonic.
+            // The global chart changes over time and the weighted shaper rotates the
+            // snapshot, while the previous snapshot is demoted to avoid repetition.
+            try
+            {
+                var globalTracks = await _lastFm.GetGlobalTopTracksAsync(candidateTarget, ct);
+                var globalCandidates = Ranked(globalTracks, "chart:global");
+                if (globalCandidates.Count >= 5)
+                    stations.Add(Create(username, "global-discovery", "Global Discovery",
+                        LastFmRadioStationKind.Global, false, ["lastfm:global-chart"],
+                        Shape(globalCandidates, plays, settings, unavailable, random,
+                            Previous("global-discovery"),
+                            ArtistCap(settings, LastFmRadioStationKind.Global),
+                            excludeRecent: true)));
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Global chart discovery was unavailable");
+            }
+
             foreach (var definition in settings.EffectiveDiscoveryStations().Where(item => item.Enabled))
             {
                 var candidates = await TracksFromTags(definition.Tags, candidateTarget, ct);

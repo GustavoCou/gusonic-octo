@@ -53,16 +53,37 @@ public sealed class ExternalSearchService
     private readonly SupersedableBuildCoordinator<List<Album>> _albumBuilds = new();
     private readonly IMusicMetadataService _metadata;
     private readonly LastFmService? _lastFm;
+    private readonly SmartSearchInterpreter _smartSearch;
+    private readonly SmartSearchAiService _smartSearchAi;
     private readonly ILogger<ExternalSearchService> _logger;
 
     public ExternalSearchService(
         IMusicMetadataService metadata,
+        SmartSearchInterpreter smartSearch,
+        SmartSearchAiService smartSearchAi,
         ILogger<ExternalSearchService> logger,
         LastFmService? lastFm = null)
     {
         _metadata = metadata;
+        _smartSearch = smartSearch;
+        _smartSearchAi = smartSearchAi;
         _logger = logger;
         _lastFm = lastFm;
+    }
+
+    public SmartSearchInterpreter.Intent Interpret(string query) => _smartSearch.Interpret(query);
+
+    private async Task<SmartSearchInterpreter.Intent> InterpretAsync(
+        string query, CancellationToken ct)
+    {
+        // Deterministic rules are instant and cover common PT/ES/EN searches. If they
+        // already recognise intent, do not spend an AI roundtrip. Otherwise an optional
+        // multilingual model gets a chance to understand arbitrary languages and slang.
+        var builtIn = _smartSearch.Interpret(query);
+        if (builtIn.IsSemantic || !_smartSearchAi.IsConfigured) return builtIn;
+
+        var ai = await _smartSearchAi.InterpretAsync(query, ct);
+        return ai ?? builtIn;
     }
 
     /// <summary>
@@ -115,67 +136,143 @@ public sealed class ExternalSearchService
     ///      single-word artist queries)
     /// Deduped by artist+title so the same track cannot appear twice.
     /// </summary>
+    /// <summary>
+    /// External tracks for a genre/tag. Used by Subsonic getSongsByGenre so clients that
+    /// expose a dedicated Genres tab can browse beyond the local Navidrome library.
+    /// </summary>
+    public async Task<IReadOnlyList<Song>> GetByTagAsync(string tag, int limit,
+        CancellationToken ct = default)
+    {
+        if (_lastFm is null || !_lastFm.HasApiKey || string.IsNullOrWhiteSpace(tag) || limit <= 0)
+            return Array.Empty<Song>();
+
+        var tracks = await _lastFm.GetTagTopTracksAsync(tag.Trim(), Math.Min(limit * 2, BuildSize), ct);
+        return await ResolveTracksAsync(tracks, Math.Min(limit, BuildSize), ct);
+    }
+
+    /// <summary>
+    /// Dynamic genre/tag catalog from Last.fm charts. No language or genre list is
+    /// compiled into Gusonic; the provider decides what is currently discoverable.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> GetDiscoveryGenresAsync(
+        int limit = 50, CancellationToken ct = default)
+    {
+        if (_lastFm is null || !_lastFm.HasApiKey || limit <= 0)
+            return Array.Empty<string>();
+
+        try
+        {
+            return await _lastFm.GetGlobalTopTagsAsync(Math.Min(limit, 100), ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("global genre discovery failed: {M}", ex.Message);
+            return Array.Empty<string>();
+        }
+    }
+
+    /// <summary>
+    /// Semantic-aware external playlist search. Natural-language requests can fan out to
+    /// compact Deezer playlist queries while literal searches remain a single call.
+    /// </summary>
+    public async Task<List<Octo.Models.Subsonic.ExternalPlaylist>> GetPlaylistsAsync(
+        string query, int limit, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query) || limit <= 0)
+            return new List<Octo.Models.Subsonic.ExternalPlaylist>();
+
+        var intent = await InterpretAsync(query, ct);
+        var queries = intent.IsSemantic ? intent.ProviderQueries.Take(3) : new[] { query };
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new List<Octo.Models.Subsonic.ExternalPlaylist>();
+
+        foreach (var providerQuery in queries)
+        {
+            try
+            {
+                var hits = await _metadata.SearchPlaylistsAsync(providerQuery, Math.Min(limit, 8));
+                foreach (var hit in hits)
+                {
+                    if (seen.Add(hit.Id)) result.Add(hit);
+                    if (result.Count >= limit) return result;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug("external playlist search failed for '{Q}': {M}", providerQuery, ex.Message);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Builds discovery results. Literal searches keep the original fuzzy-track behavior;
+    /// natural-language searches are interpreted into Last.fm tags first.
+    /// </summary>
     private async Task<List<Song>> BuildAsync(string query, CancellationToken ct)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var collected = new List<(string Artist, string Title)>();
+        var collected = new List<LastFmService.SimilarTrack>();
+        var intent = await InterpretAsync(query, ct);
 
-        var tracks = await _lastFm!.SearchTracksAsync(query, Math.Min(50, BuildSize * 2));
-        foreach (var t in tracks)
+        void AddRange(IEnumerable<LastFmService.SimilarTrack> source)
         {
-            var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
-            if (seen.Add(key)) collected.Add((t.Artist, t.Title));
-            if (collected.Count >= BuildSize) break;
-        }
-
-        if (collected.Count < BuildSize)
-        {
-            // Use the first track-search hit's artist as the canonical anchor
-            // for top-tracks padding. Falls back to the raw query string when
-            // track.search came back empty.
-            var anchor = tracks.Count > 0 ? tracks[0].Artist : query;
-            var topTracks = await _lastFm.GetArtistTopTracksAsync(anchor, BuildSize * 2);
-            foreach (var t in topTracks)
+            foreach (var track in source)
             {
-                var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
-                if (seen.Add(key)) collected.Add((t.Artist, t.Title));
+                var key = $"{track.Artist}|{track.Title}".ToLowerInvariant();
+                if (seen.Add(key)) collected.Add(track);
                 if (collected.Count >= BuildSize) break;
             }
         }
 
-        var songs = new List<Song>(collected.Count);
-        foreach (var (artist, title) in collected)
+        if (intent.IsSemantic && intent.Tags.Count > 0)
         {
-            var hits = await _metadata.SearchSongsByArtistTitleAsync(artist, title, 1);
+            foreach (var tag in intent.Tags.Take(4))
+            {
+                AddRange(await _lastFm!.GetTagTopTracksAsync(tag, Math.Min(30, BuildSize), ct));
+                if (collected.Count >= BuildSize) break;
+            }
+
+            if (collected.Count < BuildSize)
+                AddRange(await _lastFm!.SearchTracksAsync(query, Math.Min(30, BuildSize), ct));
+        }
+        else
+        {
+            var tracks = await _lastFm!.SearchTracksAsync(query, Math.Min(50, BuildSize * 2), ct);
+            AddRange(tracks);
+
+            if (collected.Count < BuildSize)
+            {
+                var anchor = tracks.Count > 0 ? tracks[0].Artist : query;
+                AddRange(await _lastFm.GetArtistTopTracksAsync(anchor, BuildSize * 2, ct));
+            }
+        }
+
+        var songs = (await ResolveTracksAsync(collected, BuildSize, ct)).ToList();
+        _logger.LogInformation(
+            "External search '{Q}' semantic={Semantic} genre={Genre} tags=[{Tags}] -> {N} placeholder songs",
+            query, intent.IsSemantic, intent.Genre, string.Join(", ", intent.Tags), songs.Count);
+        return songs;
+    }
+
+    private async Task<IReadOnlyList<Song>> ResolveTracksAsync(
+        IEnumerable<LastFmService.SimilarTrack> tracks, int limit, CancellationToken ct)
+    {
+        var songs = new List<Song>();
+        foreach (var track in tracks.Take(limit))
+        {
+            var hits = await _metadata.SearchSongsByArtistTitleAsync(
+                track.Artist, track.Title, 1, track.Duration);
             if (hits.Count > 0) songs.Add(hits[0]);
         }
-        _logger.LogInformation("External search '{Q}' -> {N} placeholder songs", query, songs.Count);
 
-        // Album/art/year from Deezer (fast), then the ACCURATE duration for the top of the
-        // list from the real YouTube video (so the scrub bar matches the audio and the
-        // client advances correctly). Bounded + cached.
         await _metadata.EnrichExternalSongsAsync(songs, ct);
         await _metadata.ResolveTopDurationsAsync(songs, ct);
 
-        // Fire-and-forget: pre-resolve YouTube videoIds for the top hits so the first
-        // /rest/stream click doesn't pay the cold yt-dlp double-call cost (ytsearch1: + -g,
-        // 6-16s combined). Arpeggi cancels at ~10s and falls back to a local song; without
-        // this, external playback is unreachable from that client. 12 is about what fits on
-        // the first page of search results.
-        //
-        // It runs LAST on purpose. It used to run before enrichment, where it wrote a
-        // videoId chosen with no duration hint while ResolveTopDurationsAsync was choosing
-        // a different one using the Deezer duration — so for the top rows the two raced and
-        // the loser could leave a song advertising the length of a video that would not be
-        // the one played.
         _ = _metadata.PrewarmYouTubeIdsAsync(songs, topN: 12);
-
-        // Same reasoning, for cover art: a client renders the first screen of results a
-        // moment after this returns, and without a prewarm each row's getCoverArt call
-        // pays for the Deezer/iTunes/Last.fm chain itself, one row at a time. 24 covers
-        // more than a screenful so scrolling a little still finds a warm cache.
         _ = _metadata.PrewarmCoverArtAsync(songs, topN: 24);
-
         return songs;
     }
+
 }
