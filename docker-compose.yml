@@ -35,7 +35,7 @@ services:
       Subsonic__CacheDurationHours: ${CACHE_DURATION_HOURS:-1}
       Subsonic__EnableExternalPlaylists: ${ENABLE_EXTERNAL_PLAYLISTS:-false}
       # Album = legacy compatibility, Native = real playlist category, Both = both.
-      Subsonic__ExternalPlaylistSearchMode: ${EXTERNAL_PLAYLIST_SEARCH_MODE:-Both}
+      Subsonic__ExternalPlaylistSearchMode: ${EXTERNAL_PLAYLIST_SEARCH_MODE:-Native}
       Subsonic__EnableSearchDiscovery: ${ENABLE_SEARCH_DISCOVERY:-true}
 
       # Where downloaded FLACs land (bind-mount below)
