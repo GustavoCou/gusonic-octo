@@ -522,8 +522,9 @@ public class SubsonicController : ControllerBase
 
         try
         {
-            var isJson = format.Equals("json", StringComparison.OrdinalIgnoreCase)
-                || relay.ContentType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true;
+            // The Subsonic f= parameter is authoritative. Some servers/proxies label
+            // XML bodies as application/json, so Content-Type is not reliable here.
+            var isJson = format.Equals("json", StringComparison.OrdinalIgnoreCase);
 
             if (isJson)
             {
