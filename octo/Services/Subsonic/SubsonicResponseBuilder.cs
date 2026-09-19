@@ -152,6 +152,70 @@ public class SubsonicResponseBuilder
         return fields;
     }
 
+    public Dictionary<string, object> ExternalPlaylistFields(ExternalPlaylist playlist)
+    {
+        var created = playlist.CreatedDate ?? DateTime.UtcNow;
+        return new Dictionary<string, object>
+        {
+            ["id"] = playlist.Id,
+            ["name"] = playlist.Name,
+            ["owner"] = string.IsNullOrWhiteSpace(playlist.CuratorName)
+                ? playlist.Provider
+                : playlist.CuratorName!,
+            ["public"] = true,
+            ["songCount"] = playlist.TrackCount,
+            ["duration"] = playlist.Duration,
+            ["created"] = created.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+            ["changed"] = created.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+            ["coverArt"] = playlist.Id,
+            ["readonly"] = true,
+            ["comment"] = playlist.Description ?? string.Empty
+        };
+    }
+
+    public IActionResult CreateExternalPlaylistResponse(
+        string format,
+        ExternalPlaylist playlist,
+        IReadOnlyList<Song> songs)
+    {
+        var fields = ExternalPlaylistFields(playlist);
+        fields["songCount"] = songs.Count;
+        fields["duration"] = songs.Sum(song => song.Duration ?? 0);
+
+        if (format.Equals("json", StringComparison.OrdinalIgnoreCase))
+        {
+            var body = new Dictionary<string, object>(fields)
+            {
+                ["entry"] = songs.Select(ConvertSongToJson).ToList()
+            };
+            return CreateJsonResponse(new Dictionary<string, object>
+            {
+                ["status"] = "ok",
+                ["version"] = SubsonicVersion,
+                ["playlist"] = body
+            });
+        }
+
+        var ns = XNamespace.Get(SubsonicNamespace);
+        var entries = songs.Select(song =>
+        {
+            var element = ConvertSongToXml(song, ns);
+            element.Name = ns + "entry";
+            return element;
+        });
+        var document = new XDocument(
+            new XElement(ns + "subsonic-response",
+                new XAttribute("status", "ok"),
+                new XAttribute("version", SubsonicVersion),
+                new XElement(ns + "playlist", Attributes(fields), entries)));
+
+        return new ContentResult
+        {
+            Content = document.ToString(),
+            ContentType = "application/xml"
+        };
+    }
+
     public IActionResult CreateRadioPlaylistResponse(string format, LastFmRadioStation station,
         IReadOnlyList<Song> songs)
     {
