@@ -58,8 +58,15 @@ public class LastFmSettings
 
     public int HistoryRetentionDays { get; set; } = 90;
     public int DiscoveryPercent { get; set; } = 35;
-    public int RefreshIntervalHours { get; set; } = 12;
+    public int RefreshIntervalHours { get; set; } = 6;
     public int MinimumPlays { get; set; } = 10;
+
+    /// <summary>
+    /// Generate rotating general-purpose playlists even when the administrator has not
+    /// configured pinned stations. These complement (not replace) Your Mix / Discovery Mix.
+    /// </summary>
+    public bool EnableBuiltInDiscoveryMixes { get; set; } = true;
+
     public List<DiscoveryStationSettings> DiscoveryStations { get; set; } = [];
 
     public int EffectiveHistoryRetentionDays => Math.Clamp(HistoryRetentionDays, 7, 365);
@@ -89,7 +96,38 @@ public class LastFmSettings
         var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var result = new List<DiscoveryStationSettings>();
 
-        foreach (var source in DiscoveryStations.Take(12))
+        IEnumerable<DiscoveryStationSettings> sources = DiscoveryStations;
+        if (EnableBuiltInDiscoveryMixes)
+        {
+            var builtIns = new[]
+            {
+                new DiscoveryStationSettings
+                {
+                    Id = "popular-mix", Name = "Popular Mix", Enabled = true,
+                    Tags = ["pop", "rock", "electronic", "hip-hop", "r&b"]
+                },
+                new DiscoveryStationSettings
+                {
+                    Id = "chill-mix", Name = "Chill Mix", Enabled = true,
+                    Tags = ["chill", "ambient", "lo-fi", "indie"]
+                },
+                new DiscoveryStationSettings
+                {
+                    Id = "energy-mix", Name = "Energy Mix", Enabled = true,
+                    Tags = ["dance", "electronic", "workout", "party"]
+                },
+                new DiscoveryStationSettings
+                {
+                    Id = "focus-mix", Name = "Focus Mix", Enabled = true,
+                    Tags = ["focus", "study", "ambient", "lo-fi"]
+                },
+            };
+
+            // Admin definitions come first and can override a built-in by id or name.
+            sources = DiscoveryStations.Concat(builtIns);
+        }
+
+        foreach (var source in sources.Take(16))
         {
             var name = (source.Name ?? "").Trim();
             var tags = (source.Tags ?? [])
