@@ -274,6 +274,181 @@ public class SubsonicController : ControllerBase
         return _responseBuilder.CreateResponse(format, "randomSongs", new { song = songs });
     }
 
+    // ---------------------------------------------------------------------
+    // Genres — Navidrome only knows genres already present in the local library.
+    // Merge a curated discovery catalog so clients such as Arpeggi can browse
+    // Last.fm-backed genres even when the library is small.
+    // ---------------------------------------------------------------------
+    [HttpGet, HttpPost]
+    [Route("rest/getGenres")]
+    [Route("rest/getGenres.view")]
+    public async Task<IActionResult> GetGenres()
+    {
+        var parameters = await ExtractAllParameters();
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var relay = await _proxyService.RelaySafeAsync("rest/getGenres", parameters);
+
+        if (!relay.Success || relay.Body is not { Length: > 0 })
+            return _responseBuilder.CreateError(format, 0, "Unable to authenticate with Navidrome");
+        if (IsFailedSubsonicBody(relay.Body, relay.ContentType))
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+
+        try
+        {
+            if (format.Equals("json", StringComparison.OrdinalIgnoreCase)
+                || relay.ContentType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                var root = JsonNode.Parse(relay.Body)!.AsObject();
+                var response = root["subsonic-response"]!.AsObject();
+                var genres = response["genres"] as JsonObject ?? new JsonObject();
+                response["genres"] = genres;
+                var rows = genres["genre"] as JsonArray ?? new JsonArray();
+                genres["genre"] = rows;
+
+                var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var node in rows)
+                {
+                    if (node is JsonObject obj)
+                    {
+                        var value = obj["value"]?.GetValue<string>();
+                        if (!string.IsNullOrWhiteSpace(value)) existing.Add(value);
+                    }
+                }
+
+                foreach (var genre in SmartSearchInterpreter.CuratedGenres)
+                {
+                    if (!existing.Add(genre)) continue;
+                    rows.Add(new JsonObject
+                    {
+                        ["value"] = genre,
+                        ["songCount"] = 0,
+                        ["albumCount"] = 0
+                    });
+                }
+
+                return File(Encoding.UTF8.GetBytes(root.ToJsonString()), "application/json");
+            }
+
+            var document = XDocument.Parse(Encoding.UTF8.GetString(relay.Body));
+            var responseElement = document.Root!;
+            var ns = responseElement.Name.Namespace;
+            var genresElement = responseElement.Elements()
+                .FirstOrDefault(element => element.Name.LocalName == "genres");
+            if (genresElement is null)
+            {
+                genresElement = new XElement(ns + "genres");
+                responseElement.Add(genresElement);
+            }
+
+            var existingXml = genresElement.Elements()
+                .Where(element => element.Name.LocalName == "genre")
+                .Select(element => element.Value)
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var genre in SmartSearchInterpreter.CuratedGenres)
+            {
+                if (!existingXml.Add(genre)) continue;
+                genresElement.Add(new XElement(ns + "genre",
+                    new XAttribute("songCount", 0),
+                    new XAttribute("albumCount", 0),
+                    genre));
+            }
+
+            return File(Encoding.UTF8.GetBytes(document.ToString()), "application/xml");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not merge discovery genres into getGenres");
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+        }
+    }
+
+    [HttpGet, HttpPost]
+    [Route("rest/getSongsByGenre")]
+    [Route("rest/getSongsByGenre.view")]
+    public async Task<IActionResult> GetSongsByGenre()
+    {
+        var parameters = await ExtractAllParameters();
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var genre = parameters.GetValueOrDefault("genre", "").Trim();
+        var count = int.TryParse(parameters.GetValueOrDefault("count", "10"), out var parsedCount)
+            ? Math.Clamp(parsedCount, 1, 500)
+            : 10;
+        var offset = int.TryParse(parameters.GetValueOrDefault("offset", "0"), out var parsedOffset)
+            ? Math.Max(parsedOffset, 0)
+            : 0;
+
+        if (genre.Length == 0)
+            return _responseBuilder.CreateError(format, 10, "Missing genre parameter");
+
+        // Ask Navidrome first: authentication and owned tracks remain authoritative.
+        var relay = await _proxyService.RelaySafeAsync("rest/getSongsByGenre", parameters);
+        if (!relay.Success || relay.Body is not { Length: > 0 })
+            return _responseBuilder.CreateError(format, 0, "Unable to authenticate with Navidrome");
+        if (IsFailedSubsonicBody(relay.Body, relay.ContentType))
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+
+        // Later pages stay native; discovery rows are injected only on page one so clients
+        // do not see the same external tracks repeated on every pagination request.
+        if (offset > 0 || !_subsonicSettings.EnableSearchDiscovery)
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+
+        try
+        {
+            if (format.Equals("json", StringComparison.OrdinalIgnoreCase)
+                || relay.ContentType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                var root = JsonNode.Parse(relay.Body)!.AsObject();
+                var response = root["subsonic-response"]!.AsObject();
+                var songs = response["songs"] as JsonObject ?? new JsonObject();
+                response["songs"] = songs;
+                var rows = songs["song"] as JsonArray ?? new JsonArray();
+                songs["song"] = rows;
+
+                var remaining = Math.Max(0, count - rows.Count);
+                if (remaining > 0)
+                {
+                    var external = await _externalSearch.GetByTagAsync(
+                        genre, remaining, HttpContext.RequestAborted);
+                    foreach (var song in external)
+                        rows.Add(JsonSerializer.SerializeToNode(_responseBuilder.ConvertSongToJson(song)));
+                }
+
+                return File(Encoding.UTF8.GetBytes(root.ToJsonString()), "application/json");
+            }
+
+            var document = XDocument.Parse(Encoding.UTF8.GetString(relay.Body));
+            var responseElement = document.Root!;
+            var ns = responseElement.Name.Namespace;
+            var songsElement = responseElement.Elements()
+                .FirstOrDefault(element => element.Name.LocalName == "songs");
+            if (songsElement is null)
+            {
+                songsElement = new XElement(ns + "songs");
+                responseElement.Add(songsElement);
+            }
+
+            var localCount = songsElement.Elements()
+                .Count(element => element.Name.LocalName == "song");
+            var remainingXml = Math.Max(0, count - localCount);
+            if (remainingXml > 0)
+            {
+                var external = await _externalSearch.GetByTagAsync(
+                    genre, remainingXml, HttpContext.RequestAborted);
+                foreach (var song in external)
+                    songsElement.Add(_responseBuilder.ConvertSongToXml(song, ns));
+            }
+
+            return File(Encoding.UTF8.GetBytes(document.ToString()), "application/xml");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not merge discovery songs for genre {Genre}", genre);
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+        }
+    }
+
     [HttpGet, HttpPost]
     [Route("rest/getPlaylists")]
     [Route("rest/getPlaylists.view")]
@@ -905,8 +1080,9 @@ public class SubsonicController : ControllerBase
             externalTarget + Math.Max(0, localSongTarget - localParsed.Songs.Count));
         var externalSongs = built.Take(externalSlice).ToList();
 
-        var playlistTask = _subsonicSettings.EnableExternalPlaylists
-            ? await _metadataService.SearchPlaylistsAsync(cleanQuery, Math.Min(requestedAlbums, 5))
+        var playlistTask = _subsonicSettings.EnableExternalPlaylists && requestedAlbums > 0
+            ? await _externalSearch.GetPlaylistsAsync(cleanQuery, Math.Min(requestedAlbums, 8),
+                HttpContext.RequestAborted)
             : new List<ExternalPlaylist>();
 
         // Degrade to no albums rather than failing the whole search if Deezer is slow,
