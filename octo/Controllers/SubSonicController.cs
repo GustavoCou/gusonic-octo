@@ -603,10 +603,11 @@ public class SubsonicController : ControllerBase
 
         if (PlaylistIdHelper.IsExternalPlaylist(id))
         {
-            var auth = parameters.ToDictionary(pair => pair.Key, pair => pair.Value);
-            auth.Remove("id");
-            var ping = await _proxyService.RelaySafeAsync("rest/ping", auth);
-            if (!ping.Success || ping.Body is null || !IsSuccessfulSubsonicResponse(ping.Body, format))
+            var externalAuth = parameters.ToDictionary(pair => pair.Key, pair => pair.Value);
+            externalAuth.Remove("id");
+            var externalPing = await _proxyService.RelaySafeAsync("rest/ping", externalAuth);
+            if (!externalPing.Success || externalPing.Body is null
+                || !IsSuccessfulSubsonicResponse(externalPing.Body, format))
                 return _responseBuilder.CreateError(format, 40, "Wrong username or password");
 
             try
@@ -616,12 +617,13 @@ public class SubsonicController : ControllerBase
                 if (playlist is null)
                     return _responseBuilder.CreateError(format, 70, "Playlist not found");
 
-                var songs = await _metadataService.GetPlaylistTracksAsync(provider, externalId);
-                _radioQueueStore.Register(songs.Select(song => song.Id));
-                _ = _metadataService.PrewarmYouTubeIdsAsync(songs, topN: 8);
-                _ = _metadataService.PrewarmCoverArtAsync(songs, topN: 16);
+                var externalSongs = await _metadataService.GetPlaylistTracksAsync(provider, externalId);
+                _radioQueueStore.Register(externalSongs.Select(song => song.Id));
+                _ = _metadataService.PrewarmYouTubeIdsAsync(externalSongs, topN: 8);
+                _ = _metadataService.PrewarmCoverArtAsync(externalSongs, topN: 16);
 
-                return _responseBuilder.CreateExternalPlaylistResponse(format, playlist, songs);
+                return _responseBuilder.CreateExternalPlaylistResponse(
+                    format, playlist, externalSongs);
             }
             catch (Exception ex)
             {
