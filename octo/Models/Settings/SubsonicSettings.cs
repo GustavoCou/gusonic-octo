@@ -226,7 +226,7 @@ public class SubsonicSettings
     /// Environment variable: SUBSONIC__EXTERNALPLAYLISTSEARCHMODE
     /// </summary>
     public ExternalPlaylistSearchMode ExternalPlaylistSearchMode { get; set; } =
-        ExternalPlaylistSearchMode.Both;
+        ExternalPlaylistSearchMode.Native;
 
     /// <summary>
     /// Include Last.fm/Deezer discovery songs and albums in search3/search2 results
